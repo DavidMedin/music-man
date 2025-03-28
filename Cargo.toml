@@ -1,0 +1,9 @@
+[package]
+name = "music-analysis"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rerun = "0.22.1"
+rustfft = "6.2"
+symphonia = { version = "0.5.4", features = ["all"] }
