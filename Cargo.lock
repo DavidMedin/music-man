@@ -3662,7 +3662,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "music-analysis"
+name = "music-man"
 version = "0.1.0"
 dependencies = [
  "rerun",
