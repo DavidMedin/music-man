@@ -35,7 +35,7 @@ pub struct Channel {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open the media source.
-    let path = "/home/david/projects/music-analysis/divine-service-shorter.mp3";
+    let path = "divine-service-shorter.mp3";
     let src = std::fs::File::open(path).expect("failed to open media");
     println!("reading file : {}", path);
 
@@ -88,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Store the track identifier, it will be used to filter packets.
     let track_id = track.id;
+    let sample_rate = track.codec_params.sample_rate.unwrap();
 
     let mut sample_count: usize = 0;
     let mut sample_buf = None;
@@ -155,17 +156,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     buf.copy_interleaved_ref(decoded);
 
                     // The samples may now be access via the `samples()` function.
-                    // print!("\rDecoded {} samples", sample_count);
 
                     let samples = buf.samples();
-                    for i in 0..samples.len() {
-                        rec.set_time_sequence("step", i as i64 + sample_count as i64);
-                        let value = &rerun::Scalar::new(samples[i] as f64);
-                        // rec.log("scalars", value)?;
-                        // rec.log("a log", &rerun::TextLog::new(format!("got {:?}", value)))?;
-                        // print!("\rGot sample : {} at {}", samples[i], i);
+                    for i in 0..samples.len()/2 {
+                        let index = i * 2;
+                        rec.set_time_seconds("step", ( index as i64 + sample_count as i64 ) as f64 / (sample_rate as f64));
+                        let value = &rerun::Scalar::new(samples[index] + samples[index+1]);
+                        rec.log("scalars", value)?;
                     }
-                    sample_count += buf.samples().len();
+                    sample_count += buf.samples().len() / 2;
                 }
             }
             Err(Error::IoError(_)) => {
