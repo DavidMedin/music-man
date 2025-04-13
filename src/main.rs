@@ -4,31 +4,33 @@ use rerun::RecordingStream;
 use rerun::external::image::metadata::Orientation;
 use rerun::external::image::{DynamicImage, ImageBuffer, Rgb, Rgba};
 use rustfft::num_traits::pow;
+use rustfft::num_traits::real::Real;
 
 mod audio_file;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rec = rerun::RecordingStreamBuilder::new("music-man").spawn()?;
     println!("Music Man Started");
-    let audio = read_file()?;
+    let rec = rerun::RecordingStreamBuilder::new("music-man")
+        // .recording_id("cs-d-out-of-tune")
+        .spawn()?;
+    let audio = read_file("2khz-sine.mp3".to_string())?;
 
-    println!("Starting Music Analysis");
+    let time_chunk_base: usize = 512;
+    for i in 0..1 {
+        let time_chunk_size = time_chunk_base * 2usize.pow(i as u32);
 
-    let time_chunk_size: usize = 2048;
-    let left_chan_results =
-        fft_samples(&audio.sample_buffers[0], time_chunk_size, audio.sample_rate)?;
+        let left_chan_results =
+            fft_samples(&audio.sample_buffers[0], time_chunk_size, audio.sample_rate)?;
 
-    println!("Sample rate: {}", audio.sample_rate);
+        let spectro = Spectrogram::new(
+            left_chan_results.freqs,
+            time_chunk_size as u32,
+            left_chan_results.hz_per_element,
+        )?;
 
-    println!("frequency per pixel : {}", left_chan_results.hz_per_element);
-
-    let spectro = Spectrogram::new(
-        left_chan_results.freqs,
-        time_chunk_size as u32,
-        left_chan_results.hz_per_element,
-    )?;
-
-    log_spectrogram(&rec, &spectro)?;
+        let title = format!("{}-freqs", time_chunk_size);
+        log_spectrogram(&rec, &spectro, &title)?;
+    }
     Ok(())
 }
 
@@ -44,39 +46,53 @@ fn fft_samples(
 ) -> Result<FftResult, Box<dyn std::error::Error>> {
     let mut samples = samples.clone();
 
+    let take_one_over_n: usize = 8; // extracted for potential future.
     let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(time_chunk_size * 2); // Computes forward FFTs of size freq_chunk_size.
+    let fft = planner.plan_fft_forward(time_chunk_size * take_one_over_n); // Computes forward FFTs of size freq_chunk_size.
 
-    let power_corrected_size =
-        samples.len() + (time_chunk_size * 2) - (samples.len() % (time_chunk_size * 2));
-    samples.resize(power_corrected_size, 0.0);
+    // let power_corrected_size = samples.len() + (time_chunk_size * take_one_over_n)
+    //     - (samples.len() % (time_chunk_size * take_one_over_n));
+    let chunk_count = samples.len().div_ceil(time_chunk_size);
+    samples.resize(chunk_count * time_chunk_size, 0.0);
+    let chunk_jump = time_chunk_size / take_one_over_n;
+    // let chunk_count = chunk_count * take_one_over_n - (take_one_over_n - 1); // add the chunks that are between consecutive chunks, and remove all chunks that would reach after the resized buffer.
+    // let chunk_jump = time_chunk_size / take_one_over_n;
 
     const FLOAT_TO_COMPLEX: fn(&f64) -> Complex<f64> = |val| Complex::new(*val, 0.0);
-    const COMPLEX_TO_FLOAT: fn(&Complex<f64>) -> f64 = |val| val.re;
+    const COMPLEX_TO_FLOAT: fn(&Complex<f64>) -> f64 = |val| val.re + val.im;
     let mut complex_samples: Vec<_> = samples.iter().map(FLOAT_TO_COMPLEX).collect();
 
-    fft.process(&mut complex_samples); // Big math
+    let mut output = vec![];
+    let mut sample_num = 0;
+    while sample_num + time_chunk_size * take_one_over_n < complex_samples.len() {
+        let mut input_buff =
+            complex_samples[sample_num..sample_num + time_chunk_size * take_one_over_n].to_vec();
+        fft.process(&mut input_buff); // Big math
+        let cut_off_a_bunch = input_buff[..input_buff.len() / take_one_over_n].to_vec();
+        output.push(cut_off_a_bunch);
+        sample_num += chunk_jump;
+    }
 
     // Remove the top half of each column (of the spectrogram). Effectively taking the lower half.
     // I think it's because the top half is less precise? Not sure abt that one.
-    let complex_samples: Vec<Vec<Complex<f64>>> = complex_samples
-        .chunks_exact(time_chunk_size * 2)
-        .map(|sl| sl[0..sl.len() / 2].to_vec())
-        .collect();
+    // let complex_samples: Vec<Vec<Complex<f64>>> = complex_samples
+    //     .chunks_exact(time_chunk_size * take_one_over_n)
+    //     .map(|sl| sl[0..sl.len() / take_one_over_n].to_vec())
+    //     .collect();
 
     // Make sure I'm not insane.
-    _ = complex_samples
-        .iter()
-        .map(|c| c.iter().map(|c| assert_eq!(c.re, c.im)));
+    // _ = complex_samples
+    //     .iter()
+    //     .map(|c| c.iter().map(|c| assert_eq!(c.re, c.im)));
 
-    let float_samples: Vec<Vec<f64>> = complex_samples
+    let float_samples: Vec<Vec<f64>> = output
         .iter()
         .map(|c| c.iter().map(COMPLEX_TO_FLOAT).collect()) // TODO: AHHH!!
         .collect();
 
     let rez = FftResult {
         freqs: float_samples,
-        hz_per_element: sample_rate as f64 / (time_chunk_size * 2) as f64,
+        hz_per_element: sample_rate as f64 / (time_chunk_size * take_one_over_n) as f64,
     };
     Ok(rez)
 }
@@ -146,6 +162,7 @@ impl Spectrogram {
 fn log_spectrogram(
     rec: &RecordingStream,
     spectro: &Spectrogram,
+    log_entity: &String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let [mut width, mut height] = spectro.size_px;
     let image_data = spectro.rgb_buffer.clone();
@@ -158,11 +175,12 @@ fn log_spectrogram(
 
     std::mem::swap(&mut width, &mut height); // since we have rotated the image.
 
-    rec.log_static("image", &image)?;
+    rec.log_static(log_entity.clone(), &image)?;
 
     let origin = [0.0, height as f32];
     // let D_note_freq = 2000.0;
     let D_note_freq = 146.83;
+    // let D_note_freq = spectro.freq_per_px;
 
     let arrow_size = 44.0;
 
@@ -176,14 +194,14 @@ fn log_spectrogram(
     for i in 0..4 {
         let freq = D_note_freq * pow(2.0, i);
         let D_note_px = (height as f64 - spectro.freq_to_position(freq)) as f32;
-        origins.push([0.0, D_note_px]);
+        origins.push([0.0, D_note_px + 0.5]); // +0.5 to point to the middle of the pixel it references.
         arrow_vecs.push([arrow_size / 3.0, 0.0]);
         arrow_colors.push(d_note_color);
         arrow_labels.push(format!("{} Hz", freq));
     }
 
     rec.log_static(
-        "/image/arrows",
+        format!("/{}/arrows", log_entity),
         &rerun::Arrows2D::from_vectors(arrow_vecs)
             .with_radii([0.25])
             .with_origins(origins)
@@ -194,10 +212,8 @@ fn log_spectrogram(
     Ok(())
 }
 
-fn read_file() -> Result<audio_file::AudioFile, Box<dyn std::error::Error>> {
-    // let path = "2khz-sine.mp3";
-    let path = "samples/half-out-of-tune-d.mp3";
-    let audio = audio_file::read_audio_file(path.to_string())?;
+fn read_file(path: String) -> Result<audio_file::AudioFile, Box<dyn std::error::Error>> {
+    let audio = audio_file::read_audio_file(path)?;
 
     Ok(audio)
 }
