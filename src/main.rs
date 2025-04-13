@@ -3,6 +3,7 @@ use rustfft::{FftPlanner, num_complex::Complex};
 use rerun::RecordingStream;
 use rerun::external::image::metadata::Orientation;
 use rerun::external::image::{DynamicImage, ImageBuffer, Rgb, Rgba};
+use rustfft::num_traits::pow;
 
 mod audio_file;
 
@@ -14,21 +15,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting Music Analysis");
 
     let time_chunk_size: usize = 2048;
-    let left_chan_freqs = fft_samples(&audio.sample_buffers[0], time_chunk_size)?;
+    let left_chan_results =
+        fft_samples(&audio.sample_buffers[0], time_chunk_size, audio.sample_rate)?;
 
-    let sample_rate = audio.sample_rate;
-    println!("Sample rate: {}", sample_rate);
+    println!("Sample rate: {}", audio.sample_rate);
 
-    // ( sample_rate / time_chunk_size )
+    println!("frequency per pixel : {}", left_chan_results.hz_per_element);
 
-    render_spectro(&rec, left_chan_freqs, time_chunk_size as u32)?;
+    let spectro = Spectrogram::new(
+        left_chan_results.freqs,
+        time_chunk_size as u32,
+        left_chan_results.hz_per_element,
+    )?;
+
+    log_spectrogram(&rec, &spectro)?;
     Ok(())
+}
+
+struct FftResult {
+    freqs: Vec<Vec<f64>>,
+    hz_per_element: f64,
 }
 
 fn fft_samples(
     samples: &Vec<f64>,
     time_chunk_size: usize,
-) -> Result<Vec<Vec<f64>>, Box<dyn std::error::Error>> {
+    sample_rate: u32,
+) -> Result<FftResult, Box<dyn std::error::Error>> {
     let mut samples = samples.clone();
 
     let mut planner = FftPlanner::new();
@@ -60,71 +73,122 @@ fn fft_samples(
         .iter()
         .map(|c| c.iter().map(COMPLEX_TO_FLOAT).collect()) // TODO: AHHH!!
         .collect();
-    Ok(float_samples)
+
+    let rez = FftResult {
+        freqs: float_samples,
+        hz_per_element: sample_rate as f64 / (time_chunk_size * 2) as f64,
+    };
+    Ok(rez)
 }
 
-fn render_spectro(
-    rec: &RecordingStream,
-    time_slices: Vec<Vec<f64>>,
-    freq_domain: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut height: u32 = time_slices.len() as u32;
-    let mut width: u32 = freq_domain;
+pub struct Spectrogram {
+    rgb_buffer: Vec<u8>,
+    size_px: [u32; 2],
+    freq_per_px: f64,
+}
 
-    let mut image_data: Vec<u8> = Vec::new();
-    image_data.resize((width * height) as usize * 3, 0);
+impl Spectrogram {
+    pub fn new(
+        time_slices: Vec<Vec<f64>>,
+        freq_domain: u32,
+        freq_per_px: f64,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let height: u32 = time_slices.len() as u32;
+        let width: u32 = freq_domain;
 
-    let time_slices: Vec<Vec<f64>> = time_slices
-        .into_iter()
-        .map(|sl| sl.iter().map(|v| v.abs()).collect())
-        .collect();
-    let max_freq: f64 = {
-        time_slices
-            .clone() // TODO: STOP! PLEASE!
+        let mut image_data: Vec<u8> = Vec::new();
+        image_data.resize((width * height) as usize * 3, 0);
+
+        let time_slices: Vec<Vec<f64>> = time_slices
             .into_iter()
-            .flatten()
-            .reduce(f64::max)
-            .unwrap()
-    };
-
-    let mod_fn = |x| x;
-    // let mod_fn = |x| f64::ln(x);
-    let max_freq = mod_fn(max_freq);
-
-    for (index, freqs) in time_slices.iter().enumerate() {
-        assert_eq!(freqs.len(), freq_domain as usize);
-        let modded_freqs: Vec<[u8; 3]> = freqs
-            .iter()
-            .map(|f| {
-                let val = ((mod_fn(*f) / max_freq) * 255.0) as u8;
-                [val, val, val]
-            })
+            .map(|sl| sl.iter().map(|v| v.abs()).collect())
             .collect();
-        let flat = modded_freqs.as_flattened();
-        let line_start = 3 * index * width as usize;
-        let line_end = 3 * (index + 1) * width as usize;
-        (&mut image_data[line_start..line_end]).copy_from_slice(flat);
+        let max_freq: f64 = {
+            time_slices
+                .clone() // TODO: STOP! PLEASE!
+                .into_iter()
+                .flatten()
+                .reduce(f64::max)
+                .unwrap()
+        };
+
+        let mod_fn = |x| x;
+        // let mod_fn = |x| f64::ln(x);
+
+        let max_freq = mod_fn(max_freq);
+
+        for (index, freqs) in time_slices.iter().enumerate() {
+            assert_eq!(freqs.len(), freq_domain as usize);
+            let modded_freqs: Vec<[u8; 3]> = freqs
+                .iter()
+                .map(|f| {
+                    let val = ((mod_fn(*f) / max_freq) * 255.0) as u8;
+                    [val, val, val]
+                })
+                .collect();
+            let flat = modded_freqs.as_flattened();
+            let line_start = 3 * index * width as usize;
+            let line_end = 3 * (index + 1) * width as usize;
+            (&mut image_data[line_start..line_end]).copy_from_slice(flat);
+        }
+        let spect = Spectrogram {
+            rgb_buffer: image_data,
+            size_px: [width, height],
+            freq_per_px,
+        };
+        Ok(spect)
     }
+    pub fn freq_to_position(&self, freq: f64) -> f64 {
+        freq / self.freq_per_px
+    }
+}
+
+fn log_spectrogram(
+    rec: &RecordingStream,
+    spectro: &Spectrogram,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let [mut width, mut height] = spectro.size_px;
+    let image_data = spectro.rgb_buffer.clone();
 
     let image_buffer: ImageBuffer<Rgb<u8>, Vec<u8>> =
         ImageBuffer::from_raw(width, height, image_data).unwrap();
     let mut dyn_image = DynamicImage::ImageRgb8(image_buffer);
     dyn_image.apply_orientation(Orientation::Rotate270);
     let image = rerun::Image::from_dynamic_image(dyn_image)?;
+
     std::mem::swap(&mut width, &mut height); // since we have rotated the image.
+
     rec.log_static("image", &image)?;
 
     let origin = [0.0, height as f32];
-    let origins = [origin; 2];
+    // let D_note_freq = 2000.0;
+    let D_note_freq = 146.83;
 
     let arrow_size = 44.0;
+
+    let mut origins = vec![origin, origin];
+    let mut arrow_vecs = vec![[arrow_size, 0.0], [0.0, -arrow_size]];
+    let mut arrow_colors = vec![[255, 0, 0], [0, 255, 0]];
+    let mut arrow_labels = vec!["time".to_string(), "freq".to_string()];
+
+    let d_note_color = [255, 0, 0];
+
+    for i in 0..4 {
+        let freq = D_note_freq * pow(2.0, i);
+        let D_note_px = (height as f64 - spectro.freq_to_position(freq)) as f32;
+        origins.push([0.0, D_note_px]);
+        arrow_vecs.push([arrow_size / 3.0, 0.0]);
+        arrow_colors.push(d_note_color);
+        arrow_labels.push(format!("{} Hz", freq));
+    }
+
     rec.log_static(
         "/image/arrows",
-        &rerun::Arrows2D::from_vectors([[arrow_size, 0.0], [0.0, -arrow_size]])
+        &rerun::Arrows2D::from_vectors(arrow_vecs)
             .with_radii([0.25])
             .with_origins(origins)
-            .with_colors([[255, 0, 0], [0, 255, 0]])
-            .with_labels(["time", "freq"]),
+            .with_colors(arrow_colors)
+            .with_labels(arrow_labels),
     )?;
 
     Ok(())
@@ -132,7 +196,7 @@ fn render_spectro(
 
 fn read_file() -> Result<audio_file::AudioFile, Box<dyn std::error::Error>> {
     // let path = "2khz-sine.mp3";
-    let path = "samples/d-note-tuned.mp3";
+    let path = "samples/half-out-of-tune-d.mp3";
     let audio = audio_file::read_audio_file(path.to_string())?;
 
     Ok(audio)
