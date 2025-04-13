@@ -11,7 +11,7 @@ const COMPLEX_TO_FLOAT: fn(&Complex<f64>) -> f64 = |val| val.re;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rec = rerun::RecordingStreamBuilder::new("music-man").spawn()?;
     println!("Music Man Started");
-    let audio = read_file_and_log(&rec)?;
+    let audio = read_file()?;
 
     // TODO: Don't clone
     println!(
@@ -62,7 +62,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Sample rate: {}", sample_rate);
 
     render_spectro(&rec, chunked_left_chan, time_chunk_size as u32)?;
-
     // Example spectrogram.
     // let frequencies: Vec<[f64; FREQ_DOMAIN]> = {
     //     let mut cum = vec![];
@@ -90,8 +89,8 @@ fn render_spectro(
     time_slices: Vec<Vec<f64>>,
     freq_domain: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let height: u32 = time_slices.len() as u32;
-    let width: u32 = freq_domain;
+    let mut height: u32 = time_slices.len() as u32;
+    let mut width: u32 = freq_domain;
 
     let mut image_data: Vec<u8> = Vec::new();
     image_data.resize((width * height) as usize * 3, 0);
@@ -108,24 +107,17 @@ fn render_spectro(
             .reduce(f64::max)
             .unwrap()
     };
-    let max_freq = f64::ln(max_freq);
-    let min_freq: f64 = {
-        time_slices
-            .clone() // TODO: STOP! PLEASE!
-            .into_iter()
-            .flatten()
-            .reduce(f64::min)
-            .unwrap()
-    };
-    println!("max freq : {}", max_freq);
-    println!("min freq : {}", min_freq);
+
+    let mod_fn = |x| x;
+    // let mod_fn = |x| f64::ln(x);
+    let max_freq = mod_fn(max_freq);
 
     for (index, freqs) in time_slices.iter().enumerate() {
         assert_eq!(freqs.len(), freq_domain as usize);
         let modded_freqs: Vec<[u8; 3]> = freqs
             .iter()
             .map(|f| {
-                let val = ((f64::ln(*f) / max_freq) * 255.0) as u8;
+                let val = ((mod_fn(*f) / max_freq) * 255.0) as u8;
                 [val, val, val]
             })
             .collect();
@@ -140,19 +132,40 @@ fn render_spectro(
     let mut dyn_image = DynamicImage::ImageRgb8(image_buffer);
     dyn_image.apply_orientation(Orientation::Rotate270);
     let image = rerun::Image::from_dynamic_image(dyn_image)?;
+    std::mem::swap(&mut width, &mut height); // since we have rotated the image.
     rec.log_static("image", &image)?;
+
+    let origin = [0.0, height as f32];
+    let origins = [origin; 2];
+
+    let arrow_size = 44.0;
+    rec.log_static(
+        "/image/arrows",
+        &rerun::Arrows2D::from_vectors([[arrow_size, 0.0], [0.0, -arrow_size]])
+            .with_radii([0.25])
+            .with_origins(origins)
+            .with_colors([[255, 0, 0], [0, 255, 0]])
+            .with_labels(["time", "freq"]),
+    )?;
+
     Ok(())
 }
 
-fn read_file_and_log(
-    rec: &RecordingStream,
-) -> Result<audio_file::AudioFile, Box<dyn std::error::Error>> {
+fn read_file() -> Result<audio_file::AudioFile, Box<dyn std::error::Error>> {
     // let path = "2khz-sine.mp3";
-    let path = "divine-service.mp3";
+    let path = "samples/d-note-tuned.mp3";
     let audio = audio_file::read_audio_file(path.to_string())?;
 
+    Ok(audio)
+}
+
+/// # Warning! This will send a ton of data to the viewer, consuming a lot of memory!
+/// A normally sized song will end up being ~1GiB of data to the viewer!
+fn log_audio_file(
+    rec: &RecordingStream,
+    audio: &audio_file::AudioFile,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("\nrecording...");
-    // let rec = rerun::RecordingStreamBuilder::new("music-man").spawn()?;
 
     for chan in 0..2 {
         let buf = &audio.sample_buffers[chan];
@@ -166,6 +179,5 @@ fn read_file_and_log(
         }
     }
     println!("\nDone!");
-
-    Ok(audio)
+    Ok(())
 }
