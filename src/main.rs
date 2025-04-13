@@ -8,6 +8,16 @@ use rustfft::num_traits::real::Real;
 
 mod audio_file;
 
+// TODO: look into these links
+/*
+https://www.chciken.com/digital/signal/processing/2020/05/13/guitar-tuner.html
+https://en.wikipedia.org/wiki/Nyquist%E2%80%93Shannon_sampling_theorem
+https://www.chciken.com/digital/signal/processing/2020/04/13/dft.html
+https://en.wikipedia.org/wiki/Pitch_detection_algorithm
+https://en.wikipedia.org/wiki/Spectral_leakage
+
+*/
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Music Man Started");
     let rec = rerun::RecordingStreamBuilder::new("music-man")
