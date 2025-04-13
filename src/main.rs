@@ -6,82 +6,61 @@ use rerun::external::image::{DynamicImage, ImageBuffer, Rgb, Rgba};
 
 mod audio_file;
 
-const FLOAT_TO_COMPLEX: fn(&f64) -> Complex<f64> = |val| Complex::new(*val, 0.0);
-const COMPLEX_TO_FLOAT: fn(&Complex<f64>) -> f64 = |val| val.re;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rec = rerun::RecordingStreamBuilder::new("music-man").spawn()?;
     println!("Music Man Started");
     let audio = read_file()?;
 
-    // TODO: Don't clone
-    println!(
-        "before max sample : {}",
-        audio.sample_buffers[0]
-            .clone()
-            .into_iter()
-            .reduce(f64::max)
-            .unwrap()
-    );
-
     println!("Starting Music Analysis");
-    // TODO: make it so that time doesn't need to be a multiple of freq.
+
     let time_chunk_size: usize = 2048;
-    // let freq_chunk_size = 32;
-    // let slices_of_time = slice_time(&audio.sample_buffers[0], time_chunk_size);
-    let mut chan = audio.sample_buffers[0].clone();
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(time_chunk_size * 2); // Computes forward FFTs of size freq_chunk_size.
-
-    // let mut collecting_chan = vec![];
-    // for time in slices_of_time {
-    let power_corrected_size =
-        chan.len() + (time_chunk_size * 2) - (chan.len() % (time_chunk_size * 2));
-    chan.resize(power_corrected_size, 0.0);
-
-    let mut chan: Vec<_> = chan.iter().map(FLOAT_TO_COMPLEX).collect();
-    fft.process(&mut chan);
-    let times: Vec<Vec<Complex<f64>>> = chan
-        .chunks_exact(time_chunk_size * 2)
-        .map(|sl| sl[0..sl.len() / 2].to_vec())
-        .collect();
-    //     collecting_chan.push(chan[0..(chan.len() / 2)].to_vec());
-    // }
-
-    // Make sure I'm not insane.
-    _ = times
-        .iter()
-        .map(|c| c.iter().map(|c| assert_eq!(c.re, c.im)));
-
-    let chunked_left_chan: Vec<Vec<f64>> = times
-        .iter()
-        .map(|c| c.iter().map(COMPLEX_TO_FLOAT).collect()) // TODO: AHHH!!
-        .collect();
+    let left_chan_freqs = fft_samples(&audio.sample_buffers[0], time_chunk_size)?;
 
     let sample_rate = audio.sample_rate;
-    // ( sample_rate / time_chunk_size )
     println!("Sample rate: {}", sample_rate);
 
-    render_spectro(&rec, chunked_left_chan, time_chunk_size as u32)?;
-    // Example spectrogram.
-    // let frequencies: Vec<[f64; FREQ_DOMAIN]> = {
-    //     let mut cum = vec![];
-    //     for i in 0..FREQ_DOMAIN {
-    //         let mut buff = [0.0; FREQ_DOMAIN];
-    //         buff[i] = 5.0;
-    //         cum.push(buff);
-    //     }
-    //     cum
-    // };
+    // ( sample_rate / time_chunk_size )
 
+    render_spectro(&rec, left_chan_freqs, time_chunk_size as u32)?;
     Ok(())
 }
 
-// let slices_of_time = slice_time(arr)
-// let freqs_over_time = slices_of_time.iter().map(|t| fft.process(t))
+fn fft_samples(
+    samples: &Vec<f64>,
+    time_chunk_size: usize,
+) -> Result<Vec<Vec<f64>>, Box<dyn std::error::Error>> {
+    let mut samples = samples.clone();
 
-fn slice_time(audio_sample: &Vec<f64>, chunk_size: u32) -> Vec<&[f64]> {
-    // TODO: Don't throw away misaligned chunks.
-    audio_sample.chunks_exact(chunk_size as usize).collect()
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(time_chunk_size * 2); // Computes forward FFTs of size freq_chunk_size.
+
+    let power_corrected_size =
+        samples.len() + (time_chunk_size * 2) - (samples.len() % (time_chunk_size * 2));
+    samples.resize(power_corrected_size, 0.0);
+
+    const FLOAT_TO_COMPLEX: fn(&f64) -> Complex<f64> = |val| Complex::new(*val, 0.0);
+    const COMPLEX_TO_FLOAT: fn(&Complex<f64>) -> f64 = |val| val.re;
+    let mut complex_samples: Vec<_> = samples.iter().map(FLOAT_TO_COMPLEX).collect();
+
+    fft.process(&mut complex_samples); // Big math
+
+    // Remove the top half of each column (of the spectrogram). Effectively taking the lower half.
+    // I think it's because the top half is less precise? Not sure abt that one.
+    let complex_samples: Vec<Vec<Complex<f64>>> = complex_samples
+        .chunks_exact(time_chunk_size * 2)
+        .map(|sl| sl[0..sl.len() / 2].to_vec())
+        .collect();
+
+    // Make sure I'm not insane.
+    _ = complex_samples
+        .iter()
+        .map(|c| c.iter().map(|c| assert_eq!(c.re, c.im)));
+
+    let float_samples: Vec<Vec<f64>> = complex_samples
+        .iter()
+        .map(|c| c.iter().map(COMPLEX_TO_FLOAT).collect()) // TODO: AHHH!!
+        .collect();
+    Ok(float_samples)
 }
 
 fn render_spectro(
