@@ -1,5 +1,7 @@
 // use rustfft::{FftPlanner, num_complex::Complex};
 
+use rerun::external::image::metadata::Orientation;
+use rerun::external::image::{DynamicImage, ImageBuffer, Rgb, Rgba};
 use rerun::external::re_types::blueprint::views::Spatial2DView;
 
 mod audio_file;
@@ -25,26 +27,46 @@ mod audio_file;
 //
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // let view = Spatial2DView {
-    //     background: Default::default(),
-    //     visual_bounds: Default::default(),
-    //     time_ranges: Default::default(),
-    // };
+    let rec = rerun::RecordingStreamBuilder::new("music-man-2").spawn()?;
 
-    let rec = rerun::RecordingStreamBuilder::new("music-man").spawn()?;
+    const FREQ_DOMAIN: usize = 100;
+    let frequencies: Vec<[f64; FREQ_DOMAIN]> = {
+        let mut cum = vec![];
+        for i in 0..FREQ_DOMAIN {
+            let mut buff = [0.0; FREQ_DOMAIN];
+            buff[i] = 5.0;
+            cum.push(buff);
+        }
+        cum
+    };
 
-    // Define the component.
-    let width = 800;
-    let height = 800;
-    let img_fmt = rerun::components::ImageFormat::rgb8([width, height]);
+    const MAX_FREQ: f64 = 5.0;
+
+    const HEIGHT: u32 = 800;
+    const WIDTH: u32 = FREQ_DOMAIN as u32;
 
     let mut image_data: Vec<u8> = Vec::new();
-    image_data.resize((width * height) as usize * 3, 100);
+    image_data.resize((WIDTH * HEIGHT) as usize * 3, 0);
 
-    // rec.log("image_ent", img_fmt)
-    let image = rerun::Image::update_fields()
-        .with_format(img_fmt)
-        .with_buffer(image_data);
+    for (index, freqs) in frequencies.iter().enumerate() {
+        let modded_freqs: Vec<[u8; 3]> = freqs
+            .iter()
+            .map(|f| {
+                let val = (f / MAX_FREQ) as u8 * 255;
+                [val, val, val]
+            })
+            .collect();
+        let flat = modded_freqs.as_flattened();
+        let line_start = 3 * index * WIDTH as usize;
+        let line_end = 3 * (index + 1) * WIDTH as usize;
+        (&mut image_data[line_start..line_end]).copy_from_slice(flat);
+    }
+
+    let image_buffer: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_raw(WIDTH, HEIGHT, image_data).unwrap();
+    let mut dyn_image = DynamicImage::ImageRgb8(image_buffer);
+    dyn_image.apply_orientation(Orientation::Rotate270);
+    let image = rerun::Image::from_dynamic_image(dyn_image)?;
     rec.log_static("image", &image)?;
     Ok(())
 }
