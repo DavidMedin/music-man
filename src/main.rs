@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use symphonia::core::audio::{Channels, SampleBuffer, Signal};
+use symphonia::core::audio::{Channels, RawSampleBuffer, SampleBuffer, Signal};
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::FormatOptions;
@@ -34,9 +34,37 @@ pub struct Channel {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Open the media source.
     let path = "divine-service-shorter.mp3";
-    let src = std::fs::File::open(path).expect("failed to open media");
+    let audio = read_audio_file(path.to_string())?;
+
+    println!("\nrecording...");
+    let rec = rerun::RecordingStreamBuilder::new("music-man").spawn()?;
+
+    for chan in 0..2 {
+        let buf = &audio.sample_buffers[chan];
+        for index in 0..audio.sample_buffers[chan].len() {
+            rec.set_time_seconds(
+                "step",
+                (index as i64 + buf.len() as i64) as f64 / (audio.sample_rate as f64),
+            );
+            let value = &rerun::Scalar::new(buf[index]);
+            rec.log(format!("channel {}", chan), value)?;
+        }
+    }
+    println!("\nDone!");
+
+    return Ok(());
+}
+
+struct AudioFile {
+    path: String,
+    sample_rate: u32,
+    sample_buffers: [Vec<f64>; 2],
+}
+
+fn read_audio_file(path: String) -> Result<AudioFile, Box<dyn std::error::Error>> {
+    // Open the media source.
+    let src = std::fs::File::open(&path).expect("failed to open media");
     println!("reading file : {}", path);
 
     // Create the media source stream.
@@ -56,11 +84,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut probed = symphonia::default::get_probe()
         .format(&hint, mss, &fmt_opts, &meta_opts)
         .expect("unsupported format");
-
-    // let Some(metadata) = probed.metadata.get() else {
-    //     panic!("no metadata");
-    // };
-    // metadata.
 
     // Get the instantiated format reader.
     let mut format = probed.format;
@@ -90,11 +113,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let track_id = track.id;
     let sample_rate = track.codec_params.sample_rate.unwrap();
 
-    let mut sample_count: usize = 0;
-    let mut sample_buf = None;
-    // let channels: HashMap<Channels, Channel> = HashMap::new();
-
-    let rec = rerun::RecordingStreamBuilder::new("music-anal").spawn()?;
+    let mut sample_buffs: [Vec<f64>; 2] = [vec![], vec![]];
+    let mut scratch_buff = None;
 
     // The decode loop.
     loop {
@@ -142,29 +162,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match decoder.decode(&packet) {
             Ok(decoded) => {
                 // Consume the decoded audio samples (see below).
-                if sample_buf.is_none() {
+
+                // Initialize buffers.
+                if scratch_buff.is_none() {
                     // Get the audio buffer specification.
                     let spec = *decoded.spec();
                     // Get the capacity of the decoded buffer. Note: This is capacity, not length!
                     let duration = decoded.capacity() as u64;
 
                     // Create the f64 sample buffer.
-                    sample_buf = Some(SampleBuffer::<f64>::new(duration, spec));
+                    scratch_buff = Some(RawSampleBuffer::<f64>::new(duration, spec));
                 }
-                // Copy the decoded audio buffer into the sample buffer in an interleaved format.
-                if let Some(buf) = &mut sample_buf {
-                    buf.copy_interleaved_ref(decoded);
+                // ------------------
+
+                if let Some(scratch) = scratch_buff.as_mut() {
+                    scratch.copy_planar_ref(decoded);
+                    assert_eq!(
+                        scratch.len() % 2,
+                        0,
+                        "left and right channels are not equal in length!!!!"
+                    );
+                    let len = scratch.len();
 
                     // The samples may now be access via the `samples()` function.
-
-                    let samples = buf.samples();
-                    for i in 0..samples.len()/2 {
-                        let index = i * 2;
-                        rec.set_time_seconds("step", ( index as i64 + sample_count as i64 ) as f64 / (sample_rate as f64));
-                        let value = &rerun::Scalar::new(samples[index] + samples[index+1]);
-                        rec.log("scalars", value)?;
+                    let bytes = scratch.as_bytes();
+                    let samples: Vec<f64> = bytes
+                        .chunks_exact(8)
+                        .map(|chunk| f64::from_le_bytes(chunk.try_into().unwrap()))
+                        .collect();
+                    assert_eq!(samples.len(), scratch.len());
+                    let sample_parts: [&[f64]; 2] = samples.split_at(len / 2).into();
+                    assert_eq!(sample_parts[0].len(), sample_parts[1].len());
+                    for plane in 0..2 {
+                        // left and right channels.
+                        sample_buffs[plane].extend_from_slice(&sample_parts[plane]);
                     }
-                    sample_count += buf.samples().len() / 2;
+
+                    scratch.clear();
+                } else {
+                    unreachable!()
                 }
             }
             Err(Error::IoError(_)) => {
@@ -184,12 +220,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // println!("\nrecording...");
-    println!("\nDone!");
-    // for step in 0..64 {
-    //     rec.set_time_sequence("step", step);
-    //     rec.log("scalars", &rerun::Scalar::new((step as f64 / 10.0).sin()))?;
-    // }
-
-    Ok(())
+    assert_eq!(
+        sample_buffs[0].len(),
+        sample_buffs[1].len(),
+        "Left and Right channels do not have same length!"
+    );
+    return Ok(AudioFile {
+        path,
+        sample_rate,
+        sample_buffers: sample_buffs,
+    });
 }
