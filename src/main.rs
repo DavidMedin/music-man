@@ -1,4 +1,4 @@
-// use rustfft::{FftPlanner, num_complex::Complex};
+use rustfft::{FftPlanner, num_complex::Complex};
 
 use rerun::external::image::metadata::Orientation;
 use rerun::external::image::{DynamicImage, ImageBuffer, Rgb, Rgba};
@@ -6,53 +6,96 @@ use rerun::external::re_types::blueprint::views::Spatial2DView;
 
 mod audio_file;
 
-// fn main() {
-//     println!("Starting Music Analysis");
-
-//     let mut planner = FftPlanner::new();
-//     let size = 1234; // Computes forward FFTs of size 1234.
-//     let fft = planner.plan_fft_forward(size);
-
-//     let mut buffer = vec![
-//         Complex {
-//             re: 0.0f32,
-//             im: 0.0f32
-//         };
-//         1234
-//     ];
-//     println!("buffer before : {:?}", buffer);
-//     fft.process(&mut buffer);
-//     println!("buffer after : {:?}", buffer);
-// }
-//
-
+// const MAX_FREQ: f64 = (20.0 * 1000.0) / 2.0; // 20kHz (max human hearing)
+// const FREQ_DOMAIN: usize = 800;
+const FLOAT_TO_COMPLEX: fn(&f64) -> Complex<f64> = |val| Complex::new(*val, 0.0);
+const COMPLEX_TO_FLOAT: fn(&Complex<f64>) -> f64 = |val| val.im;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rec = rerun::RecordingStreamBuilder::new("music-man-2").spawn()?;
+    println!("Music Man Started");
+    let audio = read_file_and_log()?;
 
-    const FREQ_DOMAIN: usize = 100;
-    let frequencies: Vec<[f64; FREQ_DOMAIN]> = {
-        let mut cum = vec![];
-        for i in 0..FREQ_DOMAIN {
-            let mut buff = [0.0; FREQ_DOMAIN];
-            buff[i] = 5.0;
-            cum.push(buff);
+    // TODO: Don't clone
+    println!(
+        "before max sample : {}",
+        audio.sample_buffers[0]
+            .clone()
+            .into_iter()
+            .reduce(f64::max)
+            .unwrap()
+    );
+
+    println!("Starting Music Analysis");
+    // TODO: make it so that time doesn't need to be a multiple of freq.
+    let time_chunk_size: u32 = 800;
+    let freq_chunk_size = 100;
+    let slices_of_time = slice_time(&audio.sample_buffers[0], time_chunk_size);
+
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(freq_chunk_size); // Computes forward FFTs of size freq_chunk_size.
+
+    let mut collecting_chan = vec![];
+    for time in slices_of_time {
+        let mut chan: Vec<_> = time.iter().map(FLOAT_TO_COMPLEX).collect();
+        for chunk in chan.chunks_exact_mut(freq_chunk_size) {
+            fft.process(chunk);
         }
-        cum
-    };
+        collecting_chan.push(chan);
+    }
+    let chunked_left_chan: Vec<Vec<f64>> = collecting_chan
+        .iter()
+        .map(|c| c.iter().map(COMPLEX_TO_FLOAT).collect()) // TODO: AHHH!!
+        .collect();
+    render_spectro(chunked_left_chan, time_chunk_size)?;
 
-    const MAX_FREQ: f64 = 5.0;
+    // Example spectrogram.
+    // let frequencies: Vec<[f64; FREQ_DOMAIN]> = {
+    //     let mut cum = vec![];
+    //     for i in 0..FREQ_DOMAIN {
+    //         let mut buff = [0.0; FREQ_DOMAIN];
+    //         buff[i] = 5.0;
+    //         cum.push(buff);
+    //     }
+    //     cum
+    // };
+
+    Ok(())
+}
+
+// let slices_of_time = slice_time(arr)
+// let freqs_over_time = slices_of_time.iter().map(|t| fft.process(t))
+
+fn slice_time(audio_sample: &Vec<f64>, chunk_size: u32) -> Vec<&[f64]> {
+    // TODO: Don't throw away misaligned chunks.
+    audio_sample.chunks_exact(chunk_size as usize).collect()
+}
+
+fn render_spectro(
+    frequencies: Vec<Vec<f64>>,
+    freq_domain: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rec = rerun::RecordingStreamBuilder::new("music-man").spawn()?;
 
     const HEIGHT: u32 = 800;
-    const WIDTH: u32 = FREQ_DOMAIN as u32;
+    let WIDTH: u32 = freq_domain;
 
     let mut image_data: Vec<u8> = Vec::new();
     image_data.resize((WIDTH * HEIGHT) as usize * 3, 0);
+
+    let max_freq: f64 = {
+        frequencies
+            .clone() // TODO: STOP! PLEASE!
+            .into_iter()
+            .flatten()
+            .reduce(f64::max)
+            .unwrap()
+    };
+    println!("max freq : {}", max_freq);
 
     for (index, freqs) in frequencies.iter().enumerate() {
         let modded_freqs: Vec<[u8; 3]> = freqs
             .iter()
             .map(|f| {
-                let val = (f / MAX_FREQ) as u8 * 255;
+                let val = (f / max_freq) as u8 * 255;
                 [val, val, val]
             })
             .collect();
@@ -71,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn read_file_and_log() -> Result<(), Box<dyn std::error::Error>> {
+fn read_file_and_log() -> Result<audio_file::AudioFile, Box<dyn std::error::Error>> {
     let path = "divine-service-shorter.mp3";
     let audio = audio_file::read_audio_file(path.to_string())?;
 
@@ -91,5 +134,5 @@ fn read_file_and_log() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("\nDone!");
 
-    Ok(())
+    Ok(audio)
 }
