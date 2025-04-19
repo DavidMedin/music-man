@@ -31,7 +31,7 @@ pub fn read_audio_file(path: String) -> Result<AudioFile, Box<dyn std::error::Er
     println!("fmt_opts: {:?}", fmt_opts);
 
     // Probe the media source.
-    let mut probed = symphonia::default::get_probe()
+    let probed = symphonia::default::get_probe()
         .format(&hint, mss, &fmt_opts, &meta_opts)
         .expect("unsupported format");
 
