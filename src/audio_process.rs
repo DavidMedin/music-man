@@ -49,3 +49,14 @@ pub fn fft_samples(
     };
     Ok(rez)
 }
+
+// TODO: make this like 100 times better pls
+pub fn get_fundamental_frequency(freqs: &Vec<f64>, hz_per_element: f64) -> f64 {
+    let (huh, what) =
+        freqs.iter().enumerate().fold(
+            (0, 0.0),
+            |(a_idx, a), (b_idx, &b)| if a < b { (b_idx, b) } else { (a_idx, a) },
+        );
+
+    hz_per_element * (huh as f64)
+}

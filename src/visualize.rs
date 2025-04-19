@@ -1,7 +1,7 @@
 use crate::{audio_file, audio_process::FftResult};
 use rerun::external::image::metadata::Orientation;
 use rerun::external::image::{DynamicImage, ImageBuffer, Rgb};
-use rerun::{RecordingStream, Scalar};
+use rerun::{Points2D, RecordingStream, Scalar};
 use rustfft::num_traits::pow;
 
 pub struct Spectrogram {
@@ -94,6 +94,7 @@ pub fn log_spectrogram(
     spectro: &Spectrogram,
     log_entity: &String,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Make image
     let [mut width, mut height] = spectro.size_px;
     let image_data = spectro.rgb_buffer.clone();
 
@@ -107,6 +108,7 @@ pub fn log_spectrogram(
 
     rec.log_static(log_entity.clone(), &image)?;
 
+    // 2. Make arrows
     let origin = [0.0, height as f32];
     let d_note_freq = 146.83;
 
@@ -128,6 +130,7 @@ pub fn log_spectrogram(
         arrow_labels.push(format!("{} Hz", freq));
     }
 
+    // 3. Log arrows.
     rec.log_static(
         format!("/{}/arrows", log_entity),
         &rerun::Arrows2D::from_vectors(arrow_vecs)
@@ -154,5 +157,24 @@ pub fn log_freq_time_plot(
         rec.log(title.as_str(), &Scalar::new(*sample))?;
     }
 
+    Ok(())
+}
+
+pub fn log_given_freqs(
+    rec: &RecordingStream,
+    parent_ent: &String,
+    spectrogram: &Spectrogram,
+    freqs: &Vec<f64>,
+    hz_per_element: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let spectro_height = spectrogram.size_px[0] as f64; // TODO: make [0] be the width.
+    let points = freqs
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (i as f32, (spectro_height - f / hz_per_element) as f32))
+        .collect::<Vec<_>>();
+    let colors = vec![[255, 0, 0]; points.len()];
+    let ent = format!("/{}/note_freqs", parent_ent);
+    rec.log_static(ent.as_str(), &Points2D::new(points).with_colors(colors))?;
     Ok(())
 }
