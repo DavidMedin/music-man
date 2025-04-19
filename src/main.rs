@@ -1,8 +1,8 @@
 use rustfft::{FftPlanner, num_complex::Complex};
 
-use rerun::RecordingStream;
 use rerun::external::image::metadata::Orientation;
 use rerun::external::image::{DynamicImage, ImageBuffer, Rgb, Rgba};
+use rerun::{RecordingStream, Scalar};
 use rustfft::num_traits::pow;
 use rustfft::num_traits::real::Real;
 
@@ -28,10 +28,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let time_chunk_base: usize = 512;
     for i in 0..1 {
         let time_chunk_size = time_chunk_base * 2usize.pow(i as u32);
+        println!("time_chunk_size: {}", time_chunk_size);
 
         let left_chan_results =
             fft_samples(&audio.sample_buffers[0], time_chunk_size, audio.sample_rate)?;
 
+        log_freq_time_plot(&rec, &left_chan_results, 2000.0)?;
         let spectro = Spectrogram::new(
             left_chan_results.freqs,
             time_chunk_size as u32,
@@ -41,6 +43,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let title = format!("{}-freqs", time_chunk_size);
         log_spectrogram(&rec, &spectro, &title)?;
     }
+    Ok(())
+}
+
+fn log_freq_time_plot(
+    rec: &RecordingStream,
+    fft_result: &FftResult,
+    freq: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let target_idx = (freq / fft_result.hz_per_element) as usize;
+    let samples: Vec<f64> = fft_result.freqs.iter().map(|hzs| hzs[target_idx]).collect();
+
+    for (idx, sample) in samples.iter().enumerate() {
+        rec.set_time_sequence("time", idx as i64);
+        rec.log("2khz-amp", &Scalar::new(*sample))?;
+    }
+
     Ok(())
 }
 
@@ -68,8 +86,11 @@ fn fft_samples(
     // let chunk_count = chunk_count * take_one_over_n - (take_one_over_n - 1); // add the chunks that are between consecutive chunks, and remove all chunks that would reach after the resized buffer.
     // let chunk_jump = time_chunk_size / take_one_over_n;
 
+    println!("chunk_count: {}", chunk_count);
+    println!("chunk_jump: {}", chunk_jump);
+    println!("sample len: {}", samples.len());
     const FLOAT_TO_COMPLEX: fn(&f64) -> Complex<f64> = |val| Complex::new(*val, 0.0);
-    const COMPLEX_TO_FLOAT: fn(&Complex<f64>) -> f64 = |val| val.re + val.im;
+    const MAG_OF_COMPLEX: fn(&Complex<f64>) -> f64 = |val| (val.re.powi(2) + val.im.powi(2)).sqrt();
     let mut complex_samples: Vec<_> = samples.iter().map(FLOAT_TO_COMPLEX).collect();
 
     let mut output = vec![];
@@ -97,7 +118,7 @@ fn fft_samples(
 
     let float_samples: Vec<Vec<f64>> = output
         .iter()
-        .map(|c| c.iter().map(COMPLEX_TO_FLOAT).collect()) // TODO: AHHH!!
+        .map(|c| c.iter().map(MAG_OF_COMPLEX).collect()) // TODO: AHHH!!
         .collect();
 
     let rez = FftResult {
